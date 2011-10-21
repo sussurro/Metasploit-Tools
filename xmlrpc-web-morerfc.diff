@@ -1,0 +1,172 @@
+Index: plugins/xmlrpc.rb
+===================================================================
+--- plugins/xmlrpc.rb	(revision 7554)
++++ plugins/xmlrpc.rb	(working copy)
+@@ -45,13 +45,23 @@
+ 		
+ 		user = opts['User'] || "msf"
+ 		pass = opts['Pass'] || ::Rex::Text.rand_text_alphanumeric(8)
++		type = opts['ServerType'] || "Basic"
++		uri  = opts['URI'] || "/RPC2"
+ 		
+ 		print_status(" XMLRPC Service: #{host}:#{port} #{ssl ? " (SSL)" : ""}")
+ 		print_status("XMLRPC Username: #{user}")
+ 		print_status("XMLRPC Password: #{pass}")
++		print_status("XMLRPC Server Type: #{type}")
+ 
+ 		@users = [ [user,pass] ]
+-		self.server	= ::Msf::RPC::Service.new(host,port,ssl,cert,ckey)
++		if(type == "Web")
++			print_status("XMLRPC Web URI: #{uri}")
++			self.server	= ::Msf::RPC::WebService.new(port,host,uri)
++		elsif(type == "Basic")
++			self.server	= ::Msf::RPC::Service.new(host,port,ssl,cert,ckey)
++		else
++			print_status("Invalid server type #{self.type}, please choose Web or Basic")
++		end
+ 
+ 		# If the run in foreground flag is not specified, then go ahead and fire
+ 		# it off in a worker thread.
+Index: msfrpcd
+===================================================================
+--- msfrpcd	(revision 7554)
++++ msfrpcd	(working copy)
+@@ -21,6 +21,8 @@
+ 	"-p" => [ true,  "Bind to this port instead of 55553"                   ],
+ 	"-U" => [ true,  "Specify the username to access msfrpcd"               ],
+ 	"-P" => [ true,  "Specify the password to access msfrpcd"               ],
++	"-t" => [ true , "Server type, [Basic|Web]"                             ],
++	"-u" => [ true, "URI for Web server"                                   ],
+ 	"-S" => [ false, "Disable SSL on the XMLRPC socket"                     ],
+ 	"-f" => [ false, "Run the daemon in the foreground"                     ],
+ 	"-h" => [ false, "Help banner"                                          ])
+@@ -29,7 +31,8 @@
+ 	'RunInForeground' => true,
+ 	'SSL'             => true,
+ 	'ServerHost'      => '0.0.0.0',
+-	'ServerPort'      => 55553
++	'ServerPort'      => 55553,
++	'ServerType'      => 'Basic'
+ }
+ 
+ foreground = false
+@@ -50,6 +53,10 @@
+ 			opts['Pass'] = val
+ 		when "-f"
+ 			foreground = true
++		when "-t"
++			opts['ServerType'] = val 
++		when "-u"
++			opts['URI'] = val  
+ 		when "-h"
+ 			print("\nUsage: #{File.basename(__FILE__)} <options>\n" +	arguments.usage)
+ 			exit
+@@ -63,8 +70,10 @@
+ 
+ $0 = "msfrpcd"
+ 
+-$stderr.puts "[*] XMLRPC starting on #{opts['ServerHost']}:#{opts['ServerPort']} (#{opts['SSL'] ? "SSL" : "NO SSL"})..."
++$stderr.puts "[*] XMLRPC starting on #{opts['ServerHost']}:#{opts['ServerPort']} (#{opts['SSL'] ? "SSL" : "NO SSL"}):#{opts['ServerType']}..."
+ 
++$stderr.puts "[*] URI: #{opts['URI']}" if(opts['URI'])
++
+ # Create an instance of the framework
+ $framework = Msf::Simple::Framework.create
+ 
+Index: lib/msf/core/rpc/service.rb
+===================================================================
+--- lib/msf/core/rpc/service.rb	(revision 7554)
++++ lib/msf/core/rpc/service.rb	(working copy)
+@@ -1,6 +1,8 @@
+ require "xmlrpc/server"
++require 'rex/service_manager'
+ require "rex"
+ 
++
+ module Msf
+ module RPC
+ class Service < ::XMLRPC::BasicServer
+@@ -71,5 +73,69 @@
+ 	end
+ 
+ end
++
++class WebService < ::XMLRPC::BasicServer
++
++	attr_accessor :service, :state, :srvhost, :srvport, :uri
++
++	
++	def initialize(port, host, uri = "/RPC2")
++		self.srvhost = host
++		self.srvport = port
++		self.uri = uri
++                self.service = nil
++		super()
++	end
++	
++	def start
++		self.state = {}
++		self.service = Rex::ServiceManager.start(
++                        Rex::Proto::Http::Server,
++                        self.srvport ,
++                        self.srvhost,
++			{
++			}
++		)
++
++		uopts = {
++                        'Proc' => Proc.new { |cli, req|
++                                        on_request_uri(cli, req)
++                                },
++                        'Path' => self.uri
++		}
++
++		self.service.add_resource(self.uri,uopts)
++	end
++	
++	def stop
++		self.state = {}
++		self.service.stop
++	end
++	
++	def wait
++		self.service.wait
++	end
++	
++	def on_client_close(c)
++		self.state.delete(c)
++	end
++	
++	def on_client_connect(c)
++		self.state[c] = ""
++	end
++	def on_request_uri(cli, req)
++		begin 
++			res = Rex::Proto::Http::Response.new()
++			res.body = process(req.body) 
++		rescue XMLRPC::FaultException => e
++			res = Rex::Proto::Http::Response.new(e.faultCode,e.faultString)
++		rescue
++			res = Rex::Proto::Http::Response.new(404,"An Error Occured")
++		end
++		cli.send_response(res)
++	end
++	
+ end
++
+ end
++end
+Index: lib/msf/core/rpc/module.rb
+===================================================================
+--- lib/msf/core/rpc/module.rb	(revision 7554)
++++ lib/msf/core/rpc/module.rb	(working copy)
+@@ -125,8 +125,8 @@
+ 	def execute(token, mtype, mname, opts)
+ 		authenticate(token)
+ 		
++		mod = _find_module(mtype,mname)
+ 		begin
+-		mod = _find_module(mtype,mname)
+ 		case mtype
+ 			when 'exploit'
+ 				_run_exploit(mod, opts)

@@ -1,0 +1,25 @@
+Index: plugins/xmlrpc.rb
+===================================================================
+--- plugins/xmlrpc.rb	(revision 9168)
++++ plugins/xmlrpc.rb	(working copy)
+@@ -116,6 +116,10 @@
+ 		self.server.add_handler(::XMLRPC::iPIMethods("module"),
+ 			::Msf::RPC::Module.new(*args)
+ 		)
++
++		self.server.add_handler(::XMLRPC::iPIMethods("db"),
++			::Msf::RPC::Db.new(*args)
++		)
+ 	
+ 		# Set the default/catch-all handler	
+ 		self.server.set_default_handler do |name, *args|
+Index: lib/msf/core/rpc.rb
+===================================================================
+--- lib/msf/core/rpc.rb	(revision 9168)
++++ lib/msf/core/rpc.rb	(working copy)
+@@ -8,4 +8,5 @@
+ require "msf/core/rpc/module"
+ require "msf/core/rpc/job"
+ require "msf/core/rpc/console"
++require "msf/core/rpc/db"
+ 

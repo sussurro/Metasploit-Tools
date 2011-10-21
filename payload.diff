@@ -1,0 +1,355 @@
+Index: lib/msf/core/rpc/module.rb
+===================================================================
+--- lib/msf/core/rpc/module.rb	(revision 9913)
++++ lib/msf/core/rpc/module.rb	(working copy)
+@@ -174,14 +174,29 @@
+ 
+ 	def _run_payload(mod, opts)
+ 		badchars = [opts['BadChars'] || ''].pack("H*")
++		fmt = opts['Format'] || 'raw'
++		force = opts['ForceEncode'] || false
++		template = opts['Template'] || nil
++		plat = opts['Platform'] || nil
++		keep = opts['KeepTemplateWorking'] || false
++		force = opts['ForceEncode'] || false
++		sled_size = opts['NopSledSize'].to_i || 0
++		iter = opts['Iterations'].to_i || 0
+ 
++
+ 		begin
+ 			res = Msf::Simple::Payload.generate_simple(mod, {
+-				'BadChars'    => badchars,
++                                'BadChars'    => badchars,
+ 				'Encoder'     => opts['Encoder'],
++                                'Format'      => fmt,
+ 				'NoComment'   => true,
+-				'Format'      => 'raw',
+-				'Options'     => opts
++                                'NopSledSize' => sled_size,
++                                'Options'     => opts,
++                                'ForceEncode' => force,
++                                'Template'    => template,
++                                'Platform'    => plat,
++                                'KeepTemplateWorking' => keep,
++                                'Iterations'  => iter
+ 			})
+ 
+ 			{"result" => "success", "payload" => res.unpack("H*")[0]}
+Index: lib/msf/core/encoded_payload.rb
+===================================================================
+--- lib/msf/core/encoded_payload.rb	(revision 9913)
++++ lib/msf/core/encoded_payload.rb	(working copy)
+@@ -45,6 +45,7 @@
+ 		self.nop_sled      = nil
+ 		self.encoder       = nil
+ 		self.nop           = nil
++		self.iterations    = (reqs['Iterations'].to_i || 1)
+ 
+ 		# Increase thread priority as necessary.  This is done
+ 		# to ensure that the encoding and sled generation get
+@@ -152,35 +153,40 @@
+ 					
+ 					next
+ 				end
+-		
+-				# Try encoding with the current encoder
+-				begin
+-					self.encoded = self.encoder.encode(self.raw, reqs['BadChars'], nil, pinst.platform)
+-				rescue EncodingError
+-					wlog("#{pinst.refname}: Encoder #{encoder.refname} failed: #{$!}", 'core', LEV_1)
+-					dlog("#{pinst.refname}: Call stack\n#{$@.join("\n")}", 'core', LEV_3)
+-					next
+-				rescue ::Exception
+-					elog("#{pinst.refname}: Broken encoder #{encoder.refname}: #{$!}", 'core', LEV_0)
+-					dlog("#{pinst.refname}: Call stack\n#{$@.join("\n")}", 'core', LEV_1)
+-					next
+-				end
+-
+-				# Get the minimum number of nops to use
+-				min = (reqs['MinNops'] || 0).to_i
+-				min = 0 if reqs['DisableNops']
+ 				
+-				# Check to see if we have enough room for the minimum requirements
+-				if ((reqs['Space']) and (reqs['Space'] < self.encoded.length + min))
+-					wlog("#{pinst.refname}: Encoded payload version is too large with encoder #{encoder.refname}",
+-						'core', LEV_1)
++				eout = self.raw.dup
+ 
+-					next
++				# Try encoding with the current encoder
++				1.upto(self.iterations) do |iter|
++					begin
++						eout = self.encoder.encode(eout, reqs['BadChars'], nil, pinst.platform)
++					rescue EncodingError
++						wlog("#{pinst.refname}: Encoder #{encoder.refname} failed: #{$!}", 'core', LEV_1)
++						dlog("#{pinst.refname}: Call stack\n#{$@.join("\n")}", 'core', LEV_3)
++						next
++					rescue ::Exception
++						elog("#{pinst.refname}: Broken encoder #{encoder.refname}: #{$!}", 'core', LEV_0)
++						dlog("#{pinst.refname}: Call stack\n#{$@.join("\n")}", 'core', LEV_1)
++						next
++					end
++	
++					# Get the minimum number of nops to use
++					min = (reqs['MinNops'] || 0).to_i
++					min = 0 if reqs['DisableNops']
++					
++					# Check to see if we have enough room for the minimum requirements
++					if ((reqs['Space']) and (reqs['Space'] < eout.length + min))
++						wlog("#{pinst.refname}: Encoded payload version is too large with encoder #{encoder.refname}",
++							'core', LEV_1)
++	
++						next
++					end
++	
++					ilog("#{pinst.refname}: Successfully encoded with encoder #{encoder.refname} (size is #{eout.length} on iteration #{iter})",
++					 'core', LEV_0)
++	
+ 				end
+-
+-				ilog("#{pinst.refname}: Successfully encoded with encoder #{encoder.refname} (size is #{self.encoded.length})",
+-					 'core', LEV_0)
+-
++				self.encoded = eout
+ 				break
+ 			}
+ 			
+@@ -305,6 +311,10 @@
+ 	# The NOP generator that was used
+ 	#
+ 	attr_reader :nop
++	#
++	# The number of encoding iteartions used
++	#
++	attr_reader :iterations
+ 
+ protected
+ 
+@@ -315,6 +325,7 @@
+ 	attr_writer :payload # :nodoc:
+ 	attr_writer :encoder # :nodoc:
+ 	attr_writer :nop # :nodoc:
++	attr_writer :iterations # :nodoc:
+ 
+ 	#
+ 	# The payload instance used to generate the payload
+Index: lib/msf/base/simple/payload.rb
+===================================================================
+--- lib/msf/base/simple/payload.rb	(revision 9913)
++++ lib/msf/base/simple/payload.rb	(working copy)
+@@ -27,6 +27,8 @@
+ 	#   NoComment   => Disables prepention of a comment
+ 	#   NopSledSize => The number of NOPs to use
+ 	#   MaxSize     => The maximum size of the payload.
++	#   Iterations  => Number of times to encode.
++	#   Force       => Force encoding.
+ 	#
+ 	# raises:
+ 	#
+@@ -38,48 +40,94 @@
+ 
+ 		# Import any options we may need
+ 		payload._import_extra_options(opts)
++		framework = payload.framework
+ 
+ 		# Generate the payload
+ 		e = EncodedPayload.create(payload,
+ 				'BadChars' => opts['BadChars'],
+ 				'MinNops'  => opts['NopSledSize'],
+ 				'Encoder'  => opts['Encoder'],
++				'Iterations'  => opts['Iterations'],
++				'ForceEncode' => opts['ForceEncode'],
+ 				'Space'    => opts['MaxSize'])
+ 
+ 		fmt = opts['Format'] || 'raw'
++		inject = opts['KeepTemplateWorking'] || false
++		altexe = opts['Template'] || nil
+ 
++		arch = payload.arch
++
+ 		# Save off the original payload length
+ 		len = e.encoded.length
+ 
+-		# Serialize the generated payload to some sort of format
+-		buf = Buffer.transform(e.encoded, fmt)
+ 
+-		# Prepend a comment
+-		if (fmt != 'raw' and opts['NoComment'] != true)
+-			((ou = payload.options.options_used_to_s(payload.datastore)) and ou.length > 0) ? ou += "\n" : ou = ''
+-			buf = Buffer.comment(
+-				"#{payload.refname} - #{len} bytes#{payload.staged? ? " (stage 1)" : ""}\n" +
+-				"http://www.metasploit.com\n" +
+-				((e.encoder) ? "Encoder: #{e.encoder.refname}\n" : '') +
+-				((e.nop) ?     "NOP gen: #{e.nop.refname}\n" : '') +
+-				"#{ou}",
+-				fmt) + buf
++		
++		case fmt
++		when 'exe'
++			buf = nil
++			if(not arch or (arch.index(ARCH_X86)))
++				buf = Msf::Util::EXE.to_win32pe(framework, e.encoded , {:insert => inject, :template => altexe})
++			end
+ 
+-			# If it's multistage, include the second stage too
+-			if payload.staged?
+-				stage = payload.generate_stage
++			if(arch and (arch.index( ARCH_X86_64 ) or arch.index( ARCH_X64 )))
++				buf = Msf::Util::EXE.to_win64pe(framework, e.encoded, {:insert => inject, :template => altexe})
++			end
+ 
+-				# If a stage was generated, then display it
+-				if stage and stage.length > 0
+-					buf +=
+-						"\n" +
+-						Buffer.comment(
+-						"#{payload.refname} - #{stage.length} bytes (stage 2)\n" +
+-						"http://www.metasploit.com\n",
+-						fmt) + Buffer.transform(stage, fmt)
+-				end
++		when 'exe-small'
++			buf = nil
++			if(not arch or (arch.index(ARCH_X86)))
++				buf = Msf::Util::EXE.to_win32pe_old(framework, e.encoded)
+ 			end
+ 
++		when 'elf'
++			buf = Msf::Util::EXE.to_linux_x86_elf(framework, e.encoded)
++		when 'macho'
++			buf = Msf::Util::EXE.to_osx_x86_macho(framework, e.encoded)
++		when 'vba'
++			exe = nil
++			exe = Msf::Util::EXE.to_win32pe(framework, e.encoded , {:insert => inject, :template => altexe})
++			buf = Msf::Util::EXE.to_exe_vba(exe)
++		when 'vbs'
++			buf = Msf::Util::EXE.to_win32pe_vbs(framework, e.encoded, {:insert => inject, :persist => false, :template => altexe})
++		when 'loop-vbs'
++			buf = Msf::Util::EXE.to_win32pe_vbs(framework, e.encoded, {:insert => inject, :persist => true, :template => altexe})
++		when 'asp'
++			buf = Msf::Util::EXE.to_win32pe_asp(framework, e.encoded , {:insert => inject, :persist => false, :template => altexe})
++		when 'war'
++			plat = Msf::Module::PlatformList.transform(opts['Platform'])
++
++			tmp_plat = plat.platforms
++			buf = Msf::Util::EXE.to_jsp_war(framework, arch, tmp_plat, e.encoded, {:persist => false, :template => altexe})
++		else
++			# Serialize the generated payload to some sort of format
++			buf = Buffer.transform(e.encoded, fmt)
++
++			# Prepend a comment
++			if (fmt != 'raw' and opts['NoComment'] != true)
++				((ou = payload.options.options_used_to_s(payload.datastore)) and ou.length > 0) ? ou += "\n" : ou = ''
++				buf = Buffer.comment(
++					"#{payload.refname} - #{len} bytes#{payload.staged? ? " (stage 1)" : ""}\n" +
++					"http://www.metasploit.com\n" +
++					((e.encoder) ? "Encoder: #{e.encoder.refname}\n" : '') +
++					((e.nop) ?     "NOP gen: #{e.nop.refname}\n" : '') +
++					"#{ou}",
++					fmt) + buf
++
++				# If it's multistage, include the second stage too
++				if payload.staged?
++					stage = payload.generate_stage
++	
++					# If a stage was generated, then display it
++					if stage and stage.length > 0
++						buf +=
++							"\n" +
++							Buffer.comment(
++							"#{payload.refname} - #{stage.length} bytes (stage 2)\n" +
++							"http://www.metasploit.com\n",
++							fmt) + Buffer.transform(stage, fmt)
++					end
++				end
++			end	
+ 		end
+ 
+ 		return buf
+@@ -95,4 +143,4 @@
+ end
+ 
+ end
+-end
+\ No newline at end of file
++end
+Index: lib/msf/ui/console/command_dispatcher/payload.rb
+===================================================================
+--- lib/msf/ui/console/command_dispatcher/payload.rb	(revision 9913)
++++ lib/msf/ui/console/command_dispatcher/payload.rb	(working copy)
+@@ -16,12 +16,18 @@
+ 
+ 	@@generate_opts = Rex::Parser::Arguments.new(
+ 		"-b" => [ true,  "The list of characters to avoid: '\\x00\\xff'"        ],
++		"-E" => [ false, "Force encoding."                                      ],
+ 		"-e" => [ true,  "The name of the encoder module to use."               ],
+ 		"-h" => [ false, "Help banner."                                         ],
+ 		"-o" => [ true,  "A comma separated list of options in VAR=VAL format." ],
+ 		"-s" => [ true,  "NOP sled length."                                     ],
+ 		"-f" => [ true,  "The output file name (otherwise stdout)"              ],
+-		"-t" => [ true,  "The output type: ruby, perl, c, or raw."              ])
++		"-t" => [ true,  "The output type: c, elf, exe, java, js_le, js_be, perl, raw,
++         ruby, vba, vbs, loop-vbs, asp, war, macho."              ],
++		"-p" => [ true,  "The Platform for output."                             ],
++		"-k" => [ false, "Keep the template executable functional"              ],
++		"-x" => [ true,  "The executable template to use"                       ],
++		"-i" => [ true,  "the number of encoding iterations."              ])
+ 
+ 	#
+ 	# Returns the hash of commands specific to payload modules.
+@@ -51,6 +57,11 @@
+ 		badchars     = nil
+ 		type         = "ruby"
+ 		ofile        = nil
++		iter         = 1
++		force        = nil
++		template     = nil
++		plat         = nil
++		keep         = false
+ 		
+ 		@@generate_opts.parse(args) { |opt, idx, val|
+ 			case opt
+@@ -58,6 +69,8 @@
+ 					badchars = Rex::Text.hex_to_raw(val)
+ 				when '-e'
+ 					encoder_name = val
++				when '-E'
++					force = true
+ 				when '-o'
+ 					option_str = val
+ 				when '-s'
+@@ -66,6 +79,14 @@
+ 					type = val
+ 				when '-f'
+ 					ofile = val
++				when '-i'
++					iter = val
++				when '-k'
++					keep = true
++				when '-p'
++					plat = val
++				when '-x'
++					template = val
+ 				when '-h'
+ 					print(
+ 						"Usage: generate [options]\n\n" +
+@@ -86,7 +107,12 @@
+ 				'Encoder'     => encoder_name,
+ 				'Format'      => type,
+ 				'NopSledSize' => sled_size,
+-				'OptionStr'   => option_str)
++				'OptionStr'   => option_str,
++				'ForceEncode' => force,
++				'Template'    => template,
++				'Platform'    => plat,
++				'KeepTemplateWorking' => keep,
++				'Iterations'  => iter)
+ 		rescue
+ 			log_error("Payload generation failed: #{$!}")
+ 			return false
+@@ -108,4 +134,4 @@
+ 
+ end
+ 
+-end end end end
+\ No newline at end of file
++end end end end

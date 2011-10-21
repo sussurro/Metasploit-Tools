@@ -1,0 +1,50 @@
+Index: lib/msf/core/encoded_payload.rb
+===================================================================
+--- lib/msf/core/encoded_payload.rb	(revision 7208)
++++ lib/msf/core/encoded_payload.rb	(working copy)
+@@ -45,6 +45,8 @@
+ 		self.nop_sled      = nil
+ 		self.encoder       = nil
+ 		self.nop           = nil
++		self.arch          = nil
++		self.platform      = nil
+ 
+ 		# Increase thread priority as necessary.  This is done
+ 		# to ensure that the encoding and sled generation get
+@@ -68,6 +70,12 @@
+ 			# Build the NOP sled
+ 			generate_sled()
+ 
++			# Set the architecture
++			self.arch = pinst.arch
++
++			# Set the platform
++			self.platform = pinst.platform
++
+ 			# Finally, set the complete payload definition
+ 			self.encoded = (self.nop_sled || '') + self.encoded
+ 		ensure	
+@@ -305,6 +313,14 @@
+ 	# The NOP generator that was used
+ 	#
+ 	attr_reader :nop
++	#
++	# The architecture of the encoded payload
++	#
++	attr_reader :arch
++	#
++	# The platform of the encoded payload
++	#
++	attr_reader :platform
+ 
+ protected
+ 
+@@ -315,6 +331,8 @@
+ 	attr_writer :payload # :nodoc:
+ 	attr_writer :encoder # :nodoc:
+ 	attr_writer :nop # :nodoc:
++	attr_writer :arch # :nodoc:
++	attr_writer :platform # :nodoc:
+ 
+ 	#
+ 	# The payload instance used to generate the payload

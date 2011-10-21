@@ -1,0 +1,100 @@
+Index: lib/msf/core/rpc/job.rb
+===================================================================
+--- lib/msf/core/rpc/job.rb	(revision 7526)
++++ lib/msf/core/rpc/job.rb	(working copy)
+@@ -22,6 +22,16 @@
+ 			{ "result" => "success" }
+ 		end
+ 	end
++	def info(token,jid)
++		authenticate(token)
++		obj = @framework.jobs[jid.to_s]
++		if(not obj)
++			raise ::XMLRPC::FaultException.new(404, "no such job")
++		else
++			info = obj.info
++			{ "result" => "success" , "info" => info}
++		end
++	end
+ end
+ end
+ end
+Index: lib/msf/ui/console/command_dispatcher/core.rb
+===================================================================
+--- lib/msf/ui/console/command_dispatcher/core.rb	(revision 7526)
++++ lib/msf/ui/console/command_dispatcher/core.rb	(working copy)
+@@ -34,6 +34,7 @@
+ 		"-h" => [ false, "Help banner."                                   ],
+ 		"-k" => [ true,  "Terminate the specified job name."              ],
+ 		"-K" => [ false, "Terminate all running jobs."                    ],
++		"-i" => [ true, "Lists information about a running job."                    ],
+ 		"-l" => [ false, "List all running jobs."                         ])
+ 
+ 	@@persist_opts = Rex::Parser::Arguments.new(
+@@ -535,7 +536,33 @@
+ 					framework.jobs.each_key do |i|
+ 						framework.jobs.stop_job(i)
+ 					end
++				when "-i"
++					if (framework.jobs[val.to_s])
++						name = framework.jobs[val.to_s].name
++						info = framework.jobs[val.to_s].info
++						mod_name = name.split(": ")[1]
+ 
++                        			if ((mod = framework.modules.create(mod_name)) == nil)
++                                			print_error("Failed to load module: #{mod_name}")
++                                			return false
++                        			end
++
++						info["datastore"].each { |key,val|
++							mod.datastore[key] = val
++						}
++                				output  = "\n"
++                				output += "Name: #{mod.name}\n"
++						print_line(output)
++
++                				if (mod.options.has_options?)
++							show_options(mod)
++                				end
++
++						mod_opt = Serializer::ReadableText.dump_advanced_options(mod,'   ')
++						print_line("\nModule advanced options:\n\n#{mod_opt}\n") if (mod_opt and mod_opt.length > 0)
++					else
++						print_line("Invalid Job ID")
++					end
+ 				when "-h"
+ 					print(
+ 						"Usage: jobs [options]\n\n" +
+Index: lib/rex/job_container.rb
+===================================================================
+--- lib/rex/job_container.rb	(revision 7526)
++++ lib/rex/job_container.rb	(working copy)
+@@ -60,6 +60,28 @@
+ 	end
+ 
+ 	#
++	# Surfaces the setings from the job to determine the current settings
++	#
++	def info
++		ret = {}
++		con = nil
++		ret['jid'] = self.jid
++		ret['name'] = self.name
++		if(self.ctx.class == Array)
++			con  = self.ctx[0]
++			
++		else
++			con = self.ctx
++		end
++		ret['datastore'] = con.datastore
++		if(con.kind_of? Msf::Exploit::Remote::HttpServer)
++			
++			ret['datastore']['URIPATH'] = con.get_resource()
++		end
++		ret
++	end
++
++	#
+ 	# The name of the job.
+ 	#
+ 	attr_reader :name
